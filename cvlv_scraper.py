@@ -41,16 +41,11 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:119.0) Gecko/20100101 Firefox/119.0",
 ]
 
-# Search parameters
-KEYWORDS = ["UI/UX", "designer", "dizaineris", "grafiskais dizaineris"]
-
-# Location filter definitions for cv.lv
-# Each entry: (display_name, url_params)
-LOCATIONS = [
-    ("Fully remote", "&workType%5B%5D=remote"),
-    ("Hybrid",       "&workType%5B%5D=hybrid"),
-    ("Rīga",         "&cities%5B%5D=R%C4%ABga"),
-]
+# Location filters only — no keyword filter.
+# All jobs matching these locations are captured; relevance filtering is
+# handled downstream (e.g. Telegram bot), same approach as the LinkedIn scraper.
+WORK_TYPES = ["remote", "hybrid"]   # workType[] values
+CITIES     = ["Rīga"]               # cities[] values
 
 BASE_SEARCH_URL = "https://www.cv.lv/en/search"
 
@@ -189,27 +184,33 @@ class CVLVJobScraper:
     # Core scraping
     # ------------------------------------------------------------------
 
-    def scrape_cvlv_jobs(self, keyword: str, location_name: str, location_params: str) -> List[Dict[str, str]]:
+    def _build_search_url(self, offset: int, page_limit: int) -> str:
+        """Build a search URL filtered by location only (no keyword filter)."""
+        import urllib.parse
+        params = []
+        params.append(f"limit={page_limit}")
+        params.append(f"offset={offset}")
+        for wt in WORK_TYPES:
+            params.append(f"workType%5B%5D={urllib.parse.quote(wt)}")
+        for city in CITIES:
+            params.append(f"cities%5B%5D={urllib.parse.quote(city)}")
+        return BASE_SEARCH_URL + "?" + "&".join(params)
+
+    def scrape_cvlv_jobs(self) -> List[Dict[str, str]]:
         """
-        Scrape cv.lv for a single keyword + location combination.
-        Iterates pages via offset param until no results or MAX_JOBS_PER_RUN reached.
+        Scrape cv.lv using a location-only filter (Fully remote, Hybrid, Rīga).
+        No keyword filter — all results are captured and relevance filtering is
+        handled downstream. Paginates via the offset param until no results or
+        MAX_JOBS_PER_RUN is reached.
         """
         jobs = []
         max_jobs = int(os.getenv('MAX_JOBS_PER_RUN', 100))
         offset = 0
         page_limit = 20
 
-        import urllib.parse
-        encoded_keyword = urllib.parse.quote(keyword)
-
         while len(jobs) < max_jobs:
-            url = (
-                f"{BASE_SEARCH_URL}"
-                f"?limit={page_limit}&offset={offset}"
-                f"&keywords%5B%5D={encoded_keyword}"
-                f"{location_params}"
-            )
-            logger.info(f"Fetching: keyword='{keyword}' location='{location_name}' offset={offset} → {url}")
+            url = self._build_search_url(offset, page_limit)
+            logger.info(f"Fetching page offset={offset} → {url}")
 
             try:
                 self.driver.get(url)
@@ -238,8 +239,7 @@ class CVLVJobScraper:
 
                 if not container:
                     logger.warning(
-                        f"No job container found for keyword='{keyword}' "
-                        f"location='{location_name}' offset={offset}. "
+                        f"No job container found at offset={offset}. "
                         "Saving debug source."
                     )
                     self._save_debug_source("cvlv_debug_source.html")
@@ -263,8 +263,7 @@ class CVLVJobScraper:
 
                 if not cards:
                     logger.info(
-                        f"No job cards on page (keyword='{keyword}', "
-                        f"location='{location_name}', offset={offset}). "
+                        f"No job cards on page at offset={offset}. "
                         "End of results."
                     )
                     self._save_debug_source("cvlv_debug_source.html")
@@ -275,7 +274,7 @@ class CVLVJobScraper:
                     if len(jobs) >= max_jobs:
                         break
                     try:
-                        job_data = self._extract_job_data(card, i, location_name)
+                        job_data = self._extract_job_data(card, i)
                         if job_data is None:
                             continue
                         if self.is_new_job(job_data['job_url']):
@@ -304,18 +303,14 @@ class CVLVJobScraper:
 
             except Exception as e:
                 logger.error(
-                    f"Error scraping page (keyword='{keyword}', "
-                    f"location='{location_name}', offset={offset}): {str(e)}"
+                    f"Error scraping page at offset={offset}: {str(e)}"
                 )
                 break
 
-        logger.info(
-            f"Finished keyword='{keyword}' location='{location_name}': "
-            f"{len(jobs)} new jobs found."
-        )
+        logger.info(f"Scrape complete: {len(jobs)} new jobs found.")
         return jobs
 
-    def _extract_job_data(self, card, index: int, location_name: str) -> Optional[Dict[str, str]]:
+    def _extract_job_data(self, card, index: int) -> Optional[Dict[str, str]]:
         """Extract job data from a single job card element."""
         try:
             # --- Job title ---
@@ -374,14 +369,14 @@ class CVLVJobScraper:
                 except NoSuchElementException:
                     continue
 
-            # --- Location tag ---
+            # --- Location tag (read from card; fall back to generic label) ---
             location_selectors = [
                 "[class*='location']",
                 ".vacancy__location",
                 "[class*='city']",
                 "[class*='address']",
             ]
-            location_tag = location_name  # fall back to the filter name
+            location_tag = "See listing"
             for sel in location_selectors:
                 try:
                     el = card.find_element(By.CSS_SELECTOR, sel)
@@ -503,28 +498,18 @@ class CVLVJobScraper:
     # ------------------------------------------------------------------
 
     def run_scraping_job(self):
-        """Run one complete scraping cycle across all keyword × location combos."""
+        """Run one complete scraping cycle — single combined search, paginated."""
         logger.info("Starting CV.LV job scraping...")
-        total_new = 0
 
         try:
             self.setup_driver()
             self.setup_google_sheets()
             self.load_existing_jobs()
 
-            for keyword in KEYWORDS:
-                for location_name, location_params in LOCATIONS:
-                    logger.info(
-                        f"--- Scraping: keyword='{keyword}' location='{location_name}' ---"
-                    )
-                    jobs = self.scrape_cvlv_jobs(keyword, location_name, location_params)
-                    self.save_jobs_to_sheets(jobs)
-                    total_new += len(jobs)
+            jobs = self.scrape_cvlv_jobs()
+            self.save_jobs_to_sheets(jobs)
 
-                    # Pause between combos (anti-detection)
-                    time.sleep(random.uniform(10, 20))
-
-            logger.info(f"Scraping completed. Total new jobs found: {total_new}")
+            logger.info(f"Scraping completed. Total new jobs found: {len(jobs)}")
 
         except Exception as e:
             logger.error(f"Error during scraping job: {str(e)}")

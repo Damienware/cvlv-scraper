@@ -1,0 +1,18 @@
+# Secrets — never commit these
+.env
+*.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs and debug output
+*.log
+cvlv_debug.png
+cvlv_debug_source.html
+cvlv_page_source.html
+
+# IDE
+.vscode/
