@@ -100,23 +100,31 @@ Expected output for `--test`:
 ✓ All systems ready!
 ```
 
-### 6. Set Up Automated Scheduling via Cron
+### 6. Set Up Automated Scheduling via systemd
 
-#### Option A: Automatic Setup
+The scraper runs as a **systemd timer + service** pair. The timer fires daily at 18:00; the service executes a single scrape run and exits (`Type=oneshot`). If the Pi was off at 18:00, `Persistent=true` ensures the run happens as soon as it boots.
+
 ```bash
-chmod +x setup_cron.sh
-bash setup_cron.sh
-
-# Add the cron job automatically (runs daily at 6 PM)
-(crontab -l 2>/dev/null; echo "0 18 * * * cd /home/pi/cvlv-scraper && /home/pi/cvlv-scraper/venv/bin/python3 /home/pi/cvlv-scraper/run_once.py >> /home/pi/cvlv-scraper/cvlv_scraper.log 2>&1") | crontab -
+chmod +x install-service.sh
+sudo bash install-service.sh
 ```
 
-#### Option B: Manual Setup
-```bash
-crontab -e
+The script auto-detects the project path and the invoking user (`$SUDO_USER`). To override the service user:
 
-# Add this line to run daily at 6 PM:
-0 18 * * * cd /home/pi/cvlv-scraper && /home/pi/cvlv-scraper/venv/bin/python3 /home/pi/cvlv-scraper/run_once.py >> /home/pi/cvlv-scraper/cvlv_scraper.log 2>&1
+```bash
+sudo bash install-service.sh myuser
+```
+
+After installation, confirm the timer is active:
+
+```bash
+systemctl list-timers cvlv-scraper.timer
+```
+
+To trigger a run immediately without waiting for 18:00:
+
+```bash
+sudo systemctl start cvlv-scraper.service
 ```
 
 ## Raspberry Pi / ARM64 Notes
@@ -145,24 +153,26 @@ Also replace the hub image if needed:
 | `python3 run_scraper.py --test` | Test connections (Google Sheets + WebDriver) |
 | `python3 run_scraper.py --once` | Run scraper once |
 | `python3 run_scraper.py --debug` | Debug cv.lv page access, saves cvlv_debug.png |
-| `python3 run_scraper.py` | Start scheduler (runs daily at 6 PM) |
-| `python3 run_once.py` | Single run (designed for cron jobs) |
+| `python3 run_scraper.py` | Start built-in scheduler (runs daily at 6 PM) |
+| `python3 run_once.py` | Single run (used by the systemd service) |
+| `sudo bash install-service.sh` | Install systemd timer + service |
+| `sudo systemctl start cvlv-scraper.service` | Trigger a manual run immediately |
 
 ## Monitoring
 
-1. **Check cron job status**:
+1. **Check timer schedule**:
    ```bash
-   crontab -l
+   systemctl list-timers cvlv-scraper.timer
    ```
 
-2. **View real-time logs**:
+2. **Follow live logs** (systemd journal):
    ```bash
-   tail -f cvlv_scraper.log
+   journalctl -u cvlv-scraper -f
    ```
 
-3. **Check recent log entries**:
+3. **View recent log entries**:
    ```bash
-   tail -20 cvlv_scraper.log
+   journalctl -u cvlv-scraper -n 50
    ```
 
 4. **View Docker container logs**:
@@ -186,16 +196,17 @@ docker compose up -d
 - Verify the service account JSON file exists at the path in `.env`
 - Confirm the service account has Editor access to the Google Sheet
 
-### 3. Cron Job Not Running
+### 3. Timer Not Running
 ```bash
-# Check if cron service is running
-sudo service cron status
+# Check timer and service status
+systemctl status cvlv-scraper.timer
+systemctl status cvlv-scraper.service
 
-# Start if needed
-sudo service cron start
+# Re-enable if accidentally disabled
+sudo systemctl enable --now cvlv-scraper.timer
 
-# Verify the job is added
-crontab -l
+# Trigger a manual run
+sudo systemctl start cvlv-scraper.service
 ```
 
 ### 4. Virtual Environment Issues
@@ -251,15 +262,18 @@ This saves:
 - [ ] Docker containers running (`docker compose up -d`)
 - [ ] Test passes (`python3 run_scraper.py --test`)
 - [ ] Single run works (`python3 run_once.py`)
-- [ ] Cron job configured (`crontab -l`)
+- [ ] systemd timer installed (`sudo bash install-service.sh`)
+- [ ] Timer active (`systemctl list-timers cvlv-scraper.timer`)
 
 ## File Structure
 
 ```
 ├── cvlv_scraper.py         # Core scraper logic
 ├── run_scraper.py          # CLI runner with --once / --test / --debug flags
-├── run_once.py             # Single-run script for cron jobs
-├── setup_cron.sh           # Cron job setup helper
+├── run_once.py             # Single-run script (used by the systemd service)
+├── cvlv-scraper.service    # systemd service unit (oneshot)
+├── cvlv-scraper.timer      # systemd timer unit (daily at 18:00)
+├── install-service.sh      # Installs and enables the systemd units
 ├── docker-compose.yml      # Docker container configuration
 ├── .env.example            # Environment variable template
 ├── requirements.txt        # Python dependencies (pinned)

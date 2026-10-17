@@ -1,0 +1,13 @@
+[Unit]
+Description=Run CV.LV Job Scraper daily at 18:00
+Requires=cvlv-scraper.service
+
+[Timer]
+# Fire every day at 18:00 local time
+OnCalendar=*-*-* 18:00:00
+# If the Pi was off at 18:00, run as soon as it boots
+Persistent=true
+Unit=cvlv-scraper.service
+
+[Install]
+WantedBy=timers.target

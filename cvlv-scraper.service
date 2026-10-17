@@ -1,0 +1,18 @@
+[Unit]
+Description=CV.LV Job Scraper (single run)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=%i
+WorkingDirectory=/home/%i/cvlv-scraper
+EnvironmentFile=/home/%i/cvlv-scraper/.env
+ExecStart=/home/%i/cvlv-scraper/venv/bin/python3 /home/%i/cvlv-scraper/run_once.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cvlv-scraper
+
+# Give the scraper up to 30 minutes to complete before systemd kills it
+TimeoutStartSec=1800
