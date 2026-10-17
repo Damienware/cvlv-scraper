@@ -242,7 +242,8 @@ This saves:
 | `GOOGLE_SHEETS_ID` | Google Sheets document ID | `1JjEwtaNeSlwfkZr1T_4P9rOJrAjFyZKIs22cKEGfb50` |
 | `GOOGLE_SERVICE_ACCOUNT_FILE` | Path to service account JSON | `/home/pi/cvlv-scraper/service-account-key.json` |
 | `SELENIUM_GRID_URL` | Selenium Grid endpoint | `http://localhost:4444/wd/hub` |
-| `MAX_JOBS_PER_RUN` | Maximum jobs per keyword/location combo | `100` |
+| `MAX_JOBS_PER_RUN` | Safety ceiling on total jobs per run | `100` |
+| `MAX_JOB_AGE_HOURS` | Stop paginating when a card is older than this | `24` |
 
 ### Cron Schedule Options
 

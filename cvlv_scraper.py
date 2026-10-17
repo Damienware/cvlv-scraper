@@ -1,9 +1,10 @@
 import os
+import re
 import time
 import random
 import logging
-from datetime import datetime
-from typing import List, Dict, Optional
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional, Tuple
 import schedule
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -40,6 +41,37 @@ USER_AGENTS = [
     "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:119.0) Gecko/20100101 Firefox/119.0",
 ]
+
+# ------------------------------------------------------------------
+# Age parsing helper
+# ------------------------------------------------------------------
+
+def _parse_renewed_age(text: str) -> Optional[timedelta]:
+    """
+    Parse cv.lv's 'Renewed X ago' label into a timedelta.
+    Examples: 'Renewed about 14 hours ago', 'Renewed 2 days ago',
+              'Renewed about 1 hour ago', 'Renewed 30 minutes ago'.
+    Returns None if the text cannot be parsed.
+    """
+    if not text:
+        return None
+    text = text.lower()
+    # Extract the first number in the string
+    m = re.search(r'(\d+)\s*(minute|hour|day|week)', text)
+    if not m:
+        return None
+    value = int(m.group(1))
+    unit = m.group(2)
+    if unit == 'minute':
+        return timedelta(minutes=value)
+    if unit == 'hour':
+        return timedelta(hours=value)
+    if unit == 'day':
+        return timedelta(days=value)
+    if unit == 'week':
+        return timedelta(weeks=value)
+    return None
+
 
 # Location filters only — no keyword filter.
 # All jobs matching these locations are captured; relevance filtering is
@@ -199,14 +231,17 @@ class CVLVJobScraper:
     def scrape_cvlv_jobs(self) -> List[Dict[str, str]]:
         """
         Scrape cv.lv using a location-only filter (Fully remote, Hybrid, Rīga).
-        No keyword filter — all results are captured and relevance filtering is
-        handled downstream. Paginates via the offset param until no results or
-        MAX_JOBS_PER_RUN is reached.
+        Results are returned newest-first by cv.lv's default ordering.
+        Pagination stops when a card is older than MAX_JOB_AGE_HOURS (default 24 h)
+        or when MAX_JOBS_PER_RUN is reached (safety ceiling).
         """
         jobs = []
         max_jobs = int(os.getenv('MAX_JOBS_PER_RUN', 100))
+        max_age_hours = int(os.getenv('MAX_JOB_AGE_HOURS', 24))
+        max_age = timedelta(hours=max_age_hours)
         offset = 0
         page_limit = 20
+        stop_pagination = False  # set True when we hit a card that's too old
 
         while len(jobs) < max_jobs:
             url = self._build_search_url(offset, page_limit)
@@ -272,11 +307,30 @@ class CVLVJobScraper:
                 page_new_count = 0
                 for i, card in enumerate(cards):
                     if len(jobs) >= max_jobs:
+                        logger.info("MAX_JOBS_PER_RUN ceiling reached.")
+                        stop_pagination = True
                         break
                     try:
                         job_data = self._extract_job_data(card, i)
                         if job_data is None:
                             continue
+
+                        # Age check — stop if this card is older than the cutoff
+                        age = _parse_renewed_age(job_data.get('renewed_text', ''))
+                        if age is not None and age > max_age:
+                            logger.info(
+                                f"Card {i} age {age} exceeds {max_age} cutoff "
+                                f"('{job_data.get('renewed_text')}'). "
+                                "Stopping pagination."
+                            )
+                            stop_pagination = True
+                            break
+                        elif age is None:
+                            logger.debug(
+                                f"Card {i}: could not parse age from "
+                                f"'{job_data.get('renewed_text')}' — including job."
+                            )
+
                         if self.is_new_job(job_data['job_url']):
                             jobs.append(job_data)
                             self.existing_jobs.add(job_data['job_url'])
@@ -293,6 +347,9 @@ class CVLVJobScraper:
                     f"Page offset={offset}: {page_new_count} new jobs "
                     f"(total so far: {len(jobs)})"
                 )
+
+                if stop_pagination:
+                    break
 
                 # If fewer cards than the page limit were returned, we've hit the last page
                 if len(cards) < page_limit:
@@ -396,11 +453,44 @@ class CVLVJobScraper:
                 logger.warning(f"Card {index}: no URL found for '{title}', skipping.")
                 return None
 
+            # --- Renewed / posted age text ---
+            renewed_selectors = [
+                "[class*='renewed']",
+                "[class*='published']",
+                "[class*='date']",
+                "[class*='age']",
+                "[class*='time']",
+            ]
+            renewed_text = ''
+            for sel in renewed_selectors:
+                try:
+                    el = card.find_element(By.CSS_SELECTOR, sel)
+                    val = (el.text or el.get_attribute('textContent') or '').strip()
+                    if val and ('ago' in val.lower() or 'hour' in val.lower()
+                                or 'day' in val.lower() or 'minute' in val.lower()):
+                        renewed_text = val
+                        logger.debug(f"Card {index}: renewed selector '{sel}' → '{renewed_text}'")
+                        break
+                except NoSuchElementException:
+                    continue
+
+            # Fallback: scan all text nodes in the card for anything that looks like an age
+            if not renewed_text:
+                try:
+                    card_text = (card.text or '').lower()
+                    m = re.search(r'renewed[^\n]*ago', card_text)
+                    if m:
+                        renewed_text = m.group(0)
+                        logger.debug(f"Card {index}: renewed fallback text → '{renewed_text}'")
+                except Exception:
+                    pass
+
             return {
                 'title': title,
                 'company': company,
                 'location': location_tag,
                 'job_url': job_url,
+                'renewed_text': renewed_text,
                 'date_added': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
 
